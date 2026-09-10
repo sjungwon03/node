@@ -16,6 +16,7 @@
 namespace node {
 
 using loader::HostDefinedOptions;
+using v8::Array;
 using v8::Boolean;
 using v8::Context;
 using v8::Data;
@@ -32,6 +33,7 @@ using v8::Module;
 using v8::ModuleRequest;
 using v8::Name;
 using v8::None;
+using v8::Null;
 using v8::Object;
 using v8::ObjectTemplate;
 using v8::PrimitiveArray;
@@ -49,6 +51,61 @@ namespace builtins {
 
 namespace {
 std::atomic<bool> harvest_code_cache{true};
+
+struct BuiltinModulePolicy {
+  const char* id;
+  bool scheme_only;
+  const char* option;
+};
+
+// Public builtins that require the node: scheme or a runtime option.
+// Keep all build variants in this list. Runtime options are evaluated in JS
+// during pre-execution, not while building the snapshot.
+constexpr BuiltinModulePolicy kBuiltinModulePolicies[] = {
+    {.id = "bench", .scheme_only = true, .option = "--experimental-bench"},
+    {.id = "bench/reporters",
+     .scheme_only = true,
+     .option = "--experimental-bench"},
+    {.id = "dtls", .scheme_only = true, .option = "--experimental-dtls"},
+    {.id = "ffi", .scheme_only = true, .option = "--experimental-ffi"},
+    {.id = "sea", .scheme_only = true, .option = nullptr},
+    {.id = "sqlite", .scheme_only = true, .option = "--experimental-sqlite"},
+    {.id = "quic", .scheme_only = true, .option = "--experimental-quic"},
+    {.id = "stream/iter",
+     .scheme_only = false,
+     .option = "--experimental-stream-iter"},
+    {.id = "test", .scheme_only = true, .option = nullptr},
+    {.id = "test/reporters", .scheme_only = true, .option = nullptr},
+    {.id = "vfs", .scheme_only = true, .option = "--experimental-vfs"},
+    {.id = "zlib/iter",
+     .scheme_only = false,
+     .option = "--experimental-stream-iter"},
+};
+
+void GetBuiltinModulePolicies(const FunctionCallbackInfo<Value>& args) {
+  Isolate* isolate = args.GetIsolate();
+  Local<Name> names[] = {
+      FIXED_ONE_BYTE_STRING(isolate, "id"),
+      FIXED_ONE_BYTE_STRING(isolate, "schemeOnly"),
+      FIXED_ONE_BYTE_STRING(isolate, "option"),
+  };
+  Local<Value> policies[arraysize(kBuiltinModulePolicies)];
+  for (size_t i = 0; i < arraysize(kBuiltinModulePolicies); ++i) {
+    const auto& policy = kBuiltinModulePolicies[i];
+    Local<Value> option = Null(isolate);
+    if (policy.option != nullptr) {
+      option = OneByteString(isolate, policy.option);
+    }
+    Local<Value> values[] = {
+        OneByteString(isolate, policy.id),
+        Boolean::New(isolate, policy.scheme_only),
+        option,
+    };
+    policies[i] =
+        Object::New(isolate, Null(isolate), names, values, arraysize(names));
+  }
+  args.GetReturnValue().Set(Array::New(isolate, policies, arraysize(policies)));
+}
 }  // namespace
 
 void BuiltinLoader::SetHarvestCodeCache(bool on) {
@@ -157,24 +214,22 @@ BuiltinLoader::BuiltinCategories BuiltinLoader::GetBuiltinCategories() const {
 #endif  // HAVE_DTLS
 #if !HAVE_FFI
         "internal/ffi-shared-buffer", "internal/ffi/fast-api",
-#endif                  // !HAVE_FFI
-        "bench",        // Experimental.
-        "bench/reporters",  // Experimental.
-        "dtls",             // Experimental.
-        "ffi",              // Experimental.
-        "quic",             // Experimental.
-        "sqlite",           // Experimental.
-        "stream/iter",      // Experimental.
-        "sys",              // Deprecated.
-        "vfs",              // Experimental.
-        "wasi",             // Experimental.
-        "zlib/iter",        // Experimental.
+#endif  // !HAVE_FFI
+        "sys",   // Deprecated.
+        "wasi",  // Experimental, but not gated by a runtime option.
 #if !HAVE_SQLITE
         "internal/webstorage",  // Experimental.
         "internal/inspector/webstorage",
 #endif
         "internal/test/binding", "internal/v8_prof_polyfill",
   };
+
+  // Code-cache tests exclude gated modules even if their options are enabled.
+  for (const auto& policy : kBuiltinModulePolicies) {
+    if (policy.option != nullptr) {
+      builtin_categories.cannot_be_required.emplace(policy.id);
+    }
+  }
 
   auto source = source_.read();
   for (auto const& x : *source) {
@@ -900,6 +955,8 @@ void BuiltinLoader::CreatePerIsolateProperties(IsolateData* isolate_data,
                                 SideEffectType::kHasNoSideEffect);
 
   SetMethod(isolate, target, "getCacheUsage", BuiltinLoader::GetCacheUsage);
+  SetMethodNoSideEffect(
+      isolate, target, "getBuiltinModulePolicies", GetBuiltinModulePolicies);
   SetMethod(isolate, target, "compileFunction", BuiltinLoader::CompileFunction);
   SetMethod(isolate, target, "hasCachedBuiltins", HasCachedBuiltins);
   SetMethod(isolate, target, "setInternalLoaders", SetInternalLoaders);
@@ -922,6 +979,7 @@ void BuiltinLoader::RegisterExternalReferences(
   registry->Register(ConfigStringGetter);
   registry->Register(BuiltinIdsGetter);
   registry->Register(GetBuiltinCategories);
+  registry->Register(GetBuiltinModulePolicies);
   registry->Register(GetCacheUsage);
   registry->Register(CompileFunction);
   registry->Register(HasCachedBuiltins);
