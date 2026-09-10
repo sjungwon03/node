@@ -2,6 +2,7 @@
 
 #include "node_ffi.h"
 #include <climits>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -41,6 +42,11 @@ using v8::TryCatch;
 using v8::Value;
 
 namespace ffi {
+
+// libffi writes promoted small integer returns through ffi_arg. All other
+// supported FFI return types fit in 8 bytes.
+constexpr size_t kFFIResultStorageSize =
+    sizeof(ffi_arg) > 8 ? sizeof(ffi_arg) : 8;
 
 void FFIFunction::Invoke(void* result, void** values) {
 #if defined(NODE_FFI_HAS_FAST_CALL_PLAN)
@@ -596,17 +602,14 @@ void DynamicLibrary::InvokeFunction(const FunctionCallbackInfo<Value>& args) {
     }
   }
 
-  void* result = nullptr;
-
-  if (fn->return_type->type != FFI_TYPE_VOID) {
-    result = Malloc(GetFFIReturnValueStorageSize(fn->return_type));
-  }
+  alignas(std::max_align_t) uint8_t result_storage[kFFIResultStorageSize];
+  void* result =
+      fn->return_type->type != FFI_TYPE_VOID ? result_storage : nullptr;
 
   fn->Invoke(result, ffi_args.data());
 
   // Return result back to Javascript
   ToJSReturnValue(env, args, fn->return_type, result);
-  free(result);
 }
 
 void DynamicLibrary::InvokeFunctionSB(const FunctionCallbackInfo<Value>& args) {
@@ -656,9 +659,7 @@ void DynamicLibrary::InvokeFunctionSB(const FunctionCallbackInfo<Value>& args) {
   // promoted small integer returns and the 8 bytes needed for non-promoted
   // SB-eligible returns like f64, i64, and u64. `sizeof(ffi_arg)` is only
   // 4 on 32-bit ARM, so take the max.
-  constexpr size_t kSBResultStorageSize =
-      sizeof(ffi_arg) > 8 ? sizeof(ffi_arg) : 8;
-  alignas(8) uint8_t result_storage[kSBResultStorageSize] = {0};
+  alignas(8) uint8_t result_storage[kFFIResultStorageSize] = {0};
   void* result = (fn->return_type != &ffi_type_void) ? result_storage : nullptr;
 
   fn->Invoke(result, ffi_args.data());
